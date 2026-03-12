@@ -1,0 +1,35 @@
+services:
+  daily-web:
+    build:
+      context: ..
+    container_name: daily-web
+    restart: unless-stopped
+    environment:
+      PUSH_SERVER_PORT: 8787
+      PUSH_ALLOWED_ORIGIN: https://${DAILY_DOMAIN}
+      PUSH_VAPID_SUBJECT: ${PUSH_VAPID_SUBJECT:-mailto:daily@example.local}
+      PUSH_VAPID_PUBLIC_KEY: ${PUSH_VAPID_PUBLIC_KEY:-}
+      PUSH_VAPID_PRIVATE_KEY: ${PUSH_VAPID_PRIVATE_KEY:-}
+    volumes:
+      - daily_web_data:/app/server/data
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: daily-web-caddy
+    restart: unless-stopped
+    depends_on:
+      - daily-web
+    environment:
+      DAILY_DOMAIN: ${DAILY_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  daily_web_data:
+  caddy_data:
+  caddy_config:

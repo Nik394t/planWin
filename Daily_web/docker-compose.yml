@@ -1,0 +1,17 @@
+services:
+  daily-web:
+    build:
+      context: .
+    container_name: daily-web
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PUSH_SERVER_PORT: 8787
+      PUSH_ALLOWED_ORIGIN: http://localhost:8787
+      PUSH_VAPID_SUBJECT: mailto:daily@example.local
+    volumes:
+      - daily_web_data:/app/server/data
+
+volumes:
+  daily_web_data:

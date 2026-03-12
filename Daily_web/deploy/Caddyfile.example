@@ -1,0 +1,4 @@
+{$DAILY_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy daily-web:8787
+}
