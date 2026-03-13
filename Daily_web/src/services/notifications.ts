@@ -2,6 +2,8 @@ import { appTabUrl, assetUrl } from '../app/paths';
 import { dayKey, formatTime } from '../domain/date';
 import { currentTasks, nowForSnapshot } from '../domain/planner';
 import type { DailySnapshot } from '../domain/types';
+import type { AuthSession } from './auth';
+import { authHeaders, postJson, requestJson } from './api';
 
 const deliveredKey = 'daily-web-notification-log';
 const deviceIdKey = 'daily-web-device-id';
@@ -20,20 +22,6 @@ interface PushConfigResponse {
 }
 
 let pushConfigCache: PushConfigResponse | null = null;
-
-function getApiBase(): string | null {
-  const explicit = import.meta.env.VITE_PUSH_API_BASE_URL?.trim();
-  if (explicit) {
-    return explicit.replace(/\/$/, '');
-  }
-  if (typeof window !== 'undefined') {
-    if (['localhost', '127.0.0.1'].includes(window.location.hostname)) {
-      return 'http://localhost:8787';
-    }
-    return window.location.origin;
-  }
-  return null;
-}
 
 function getDeviceId(): string {
   const current = localStorage.getItem(deviceIdKey)?.trim();
@@ -82,21 +70,13 @@ async function fetchPushConfig(): Promise<PushConfigResponse | null> {
   if (pushConfigCache) {
     return pushConfigCache;
   }
-  const apiBase = getApiBase();
-  if (!apiBase) {
-    return null;
-  }
   try {
-    const response = await fetch(`${apiBase}/api/push/config`);
-    if (!response.ok) {
+    const { response, data } = await requestJson<PushConfigResponse>('/api/push/config');
+    if (!response.ok || !data?.enabled || !data.publicKey) {
       return null;
     }
-    const payload = (await response.json()) as PushConfigResponse;
-    if (!payload.enabled || !payload.publicKey) {
-      return null;
-    }
-    pushConfigCache = payload;
-    return payload;
+    pushConfigCache = data;
+    return data;
   } catch {
     return null;
   }
@@ -163,9 +143,8 @@ export async function showNotification(payload: NotificationPayload): Promise<bo
   return true;
 }
 
-export async function syncSnapshotWithPushBackend(snapshot: DailySnapshot): Promise<boolean> {
-  const apiBase = getApiBase();
-  if (!apiBase) {
+export async function syncSnapshotWithPushBackend(session: AuthSession | null, snapshot: DailySnapshot): Promise<boolean> {
+  if (!session) {
     return false;
   }
   const registration = await ensurePushSubscription();
@@ -173,14 +152,12 @@ export async function syncSnapshotWithPushBackend(snapshot: DailySnapshot): Prom
     return false;
   }
   try {
-    const response = await fetch(`${apiBase}/api/push/sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: registration.deviceId,
-        subscription: registration.subscription,
-        snapshot,
-      }),
+    const { response } = await postJson<{ ok: boolean }>('/api/push/sync', {
+      deviceId: registration.deviceId,
+      subscription: registration.subscription,
+      snapshot,
+    }, {
+      headers: authHeaders(session.token),
     });
     return response.ok;
   } catch {
@@ -188,17 +165,16 @@ export async function syncSnapshotWithPushBackend(snapshot: DailySnapshot): Prom
   }
 }
 
-export async function unsubscribeFromPushBackend(): Promise<boolean> {
-  const apiBase = getApiBase();
+export async function unsubscribeFromPushBackend(session: AuthSession | null): Promise<boolean> {
   const deviceId = localStorage.getItem(deviceIdKey)?.trim();
-  if (!apiBase || !deviceId) {
+  if (!session || !deviceId) {
     return false;
   }
   try {
-    const response = await fetch(`${apiBase}/api/push/unsubscribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId }),
+    const { response } = await postJson<{ ok: boolean }>('/api/push/unsubscribe', {
+      deviceId,
+    }, {
+      headers: authHeaders(session.token),
     });
     return response.ok;
   } catch {
@@ -206,9 +182,8 @@ export async function unsubscribeFromPushBackend(): Promise<boolean> {
   }
 }
 
-export async function sendRemoteTestNotification(): Promise<boolean> {
-  const apiBase = getApiBase();
-  if (!apiBase) {
+export async function sendRemoteTestNotification(session: AuthSession | null): Promise<boolean> {
+  if (!session) {
     return false;
   }
   const registration = await ensurePushSubscription();
@@ -216,10 +191,10 @@ export async function sendRemoteTestNotification(): Promise<boolean> {
     return false;
   }
   try {
-    const response = await fetch(`${apiBase}/api/push/test`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId: registration.deviceId }),
+    const { response } = await postJson<{ ok: boolean }>('/api/push/test', {
+      deviceId: registration.deviceId,
+    }, {
+      headers: authHeaders(session.token),
     });
     return response.ok;
   } catch {

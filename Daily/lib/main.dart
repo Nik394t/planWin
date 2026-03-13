@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -1205,25 +1207,58 @@ class SettingsScreen extends StatelessWidget {
                       Icons.ios_share,
                       color: DailyPalette.accent,
                     ),
-                    title: const Text('Экспорт (демо)'),
+                    title: const Text('Экспорт данных'),
                     subtitle: const Text(
-                      'Запишет событие экспорта в историю приложения',
+                      'Сохранить совместимую резервную копию для Daily Web и мобильной версии',
                     ),
                     trailing: const Icon(
                       Icons.chevron_right,
                       color: DailyPalette.textMuted,
                     ),
-                    onTap: () {
-                      controller.markExport();
+                    onTap: () async {
+                      final warning = await controller.exportPortableBackup();
+                      if (!context.mounted) {
+                        return;
+                      }
                       ScaffoldMessenger.of(context)
                         ..hideCurrentSnackBar()
                         ..showSnackBar(
-                          const SnackBar(
+                          SnackBar(
                             content: Text(
-                              'Событие экспорта добавлено в историю.',
+                              warning ?? 'Резервная копия сохранена.',
                             ),
                           ),
                       );
+                    },
+                  ),
+                  const Divider(color: DailyPalette.border),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.download_rounded,
+                      color: DailyPalette.accent,
+                    ),
+                    title: const Text('Импорт данных'),
+                    subtitle: const Text(
+                      'Загрузить резервную копию из Daily Web или мобильной версии',
+                    ),
+                    trailing: const Icon(
+                      Icons.chevron_right,
+                      color: DailyPalette.textMuted,
+                    ),
+                    onTap: () async {
+                      final warning = await controller.importPortableBackup();
+                      if (!context.mounted) {
+                        return;
+                      }
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              warning ?? 'Резервная копия импортирована.',
+                            ),
+                          ),
+                        );
                     },
                   ),
                   const Divider(color: DailyPalette.border),
@@ -2030,9 +2065,72 @@ class PlanController extends ChangeNotifier {
     return null;
   }
 
-  void markExport() {
-    _addHistory('export', 'Выполнен экспорт данных (демо)');
-    _notifyAndPersist();
+  Future<String?> exportPortableBackup() async {
+    try {
+      final payload = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(_buildExchangeEnvelope());
+      final bytes = Uint8List.fromList(utf8.encode(payload));
+      final fileName =
+          'daily-exchange-${dateOnly(_clock()).toIso8601String().split('T').first}.json';
+
+      final savedPath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Экспорт Daily',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: const <String>['json'],
+        bytes: bytes,
+      );
+
+      if (savedPath == null || savedPath.trim().isEmpty) {
+        return 'Экспорт отменён.';
+      }
+
+      _addHistory('export', 'Выполнен экспорт данных');
+      _notifyAndPersist();
+      return null;
+    } catch (_) {
+      return 'Не удалось сохранить файл экспорта.';
+    }
+  }
+
+  Future<String?> importPortableBackup() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const <String>['json'],
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) {
+        return 'Импорт отменён.';
+      }
+
+      final file = result.files.single;
+      final bytes = file.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        return 'Не удалось прочитать файл импорта.';
+      }
+
+      final raw = jsonDecode(utf8.decode(bytes));
+      final snapshot = _extractImportSnapshot(raw);
+      if (snapshot == null) {
+        return 'Файл не похож на резервную копию Daily.';
+      }
+
+      _restoreSnapshot(snapshot);
+      _prepareCurrentView();
+      _addHistory('import', 'Импортированы данные из резервной копии');
+      _notifyAndPersist();
+      final synced = await _syncNotificationsWithNative();
+      if (!synced) {
+        return 'Данные импортированы, но расписание уведомлений обновить не удалось.';
+      }
+      return null;
+    } on FormatException {
+      return 'Файл не удалось распознать. Проверь формат JSON.';
+    } catch (_) {
+      return 'Не удалось выполнить импорт.';
+    }
   }
 
   List<PlanTask> tasksFor(PlanScope scope, String periodKey) {
@@ -2134,20 +2232,33 @@ class PlanController extends ChangeNotifier {
       ..addAll(_asStringList(snapshot['initializedPeriods']));
     _finalizedPeriods
       ..clear()
-      ..addAll(_asStringList(snapshot['finalizedPeriods']));
+      ..addAll(
+        _asStringList(snapshot['finalizedPeriods']).followedBy(
+          _asStringList(snapshot['finalisedPeriods']),
+        ),
+      );
 
     _taskId = _readInt(snapshot['taskId']) ?? _nextTaskId();
     _recurringId = _readInt(snapshot['recurringId']) ?? _nextRecurringId();
     _historyId = _readInt(snapshot['historyId']) ?? _nextHistoryId();
 
-    final notificationsRaw = snapshot['notificationsEnabled'];
+    final settingsRaw = snapshot['settings'];
+    final settings = settingsRaw is Map<String, dynamic>
+        ? settingsRaw
+        : settingsRaw is Map
+        ? settingsRaw.cast<String, dynamic>()
+        : const <String, dynamic>{};
+
+    final notificationsRaw =
+        settings['notificationsEnabled'] ?? snapshot['notificationsEnabled'];
     if (notificationsRaw is bool) {
       _notificationsEnabled = notificationsRaw;
     } else if (notificationsRaw is num) {
       _notificationsEnabled = notificationsRaw != 0;
     }
 
-    final morningTimeRaw = snapshot['morningNotificationTime'];
+    final morningTimeRaw =
+        settings['morningTime'] ?? snapshot['morningNotificationTime'];
     if (morningTimeRaw is String) {
       final normalized = normalizeTime(morningTimeRaw);
       if (normalized != null) {
@@ -2155,7 +2266,8 @@ class PlanController extends ChangeNotifier {
       }
     }
 
-    final eveningTimeRaw = snapshot['eveningNotificationTime'];
+    final eveningTimeRaw =
+        settings['eveningTime'] ?? snapshot['eveningNotificationTime'];
     if (eveningTimeRaw is String) {
       final normalized = normalizeTime(eveningTimeRaw);
       if (normalized != null) {
@@ -2172,9 +2284,16 @@ class PlanController extends ChangeNotifier {
       }
     }
 
-    final timezoneRaw = snapshot['timezoneId'];
+    final timezoneRaw = settings['timezoneId'] ?? snapshot['timezoneId'];
     if (timezoneRaw is String && timezoneRaw.trim().isNotEmpty) {
       _timezoneId = timezoneRaw.trim();
+    }
+
+    final lastObservedDayRaw = snapshot['lastObservedDayKey'];
+    if (lastObservedDayRaw is String && isDayKey(lastObservedDayRaw.trim())) {
+      _lastObservedDayKey = lastObservedDayRaw.trim();
+    } else {
+      _lastObservedDayKey = dayKey(today);
     }
 
     _ensurePrayerRows();
@@ -2265,6 +2384,389 @@ class PlanController extends ChangeNotifier {
       'eveningNotificationTime': _eveningNotificationTime,
       'timezoneId': _timezoneId,
     };
+  }
+
+  Map<String, dynamic> _buildPortableSnapshot() {
+    final now = _clock();
+    return {
+      'schemaVersion': 1,
+      'activeTab': 'plans',
+      'activeScope': _activeScope.name,
+      'selectedPeriods': {
+        for (final scope in PlanScope.values)
+          scope.name: _selectedPeriods[scope] ?? defaultPeriodKey(scope, now),
+      },
+      'tasks': _tasks
+          .map(
+            (task) => {
+              'id': _portableTaskId(task.id),
+              'scope': task.scope.name,
+              'periodKey': task.periodKey,
+              'title': task.title,
+              'description': task.description,
+              'source': task.source.name,
+              'isLocked': task.isLocked,
+              'recurringId': task.recurringId == null
+                  ? null
+                  : _portableRecurringId(task.recurringId!),
+              'isDone': task.isDone,
+              'doneAt': task.doneAt?.toIso8601String(),
+              'remindersEnabled': task.remindersEnabled,
+              'reminders': _portableReminderList(task.reminders),
+              'createdAt': task.createdAt.toIso8601String(),
+              'updatedAt': task.updatedAt.toIso8601String(),
+            },
+          )
+          .toList(growable: false),
+      'recurring': _recurring
+          .map(
+            (template) => {
+              'id': _portableRecurringId(template.id),
+              'scope': template.scope.name,
+              'title': template.title,
+              'description': template.description,
+              'remindersEnabled': template.remindersEnabled,
+              'reminders': _portableReminderList(template.reminders),
+              'referencePeriodKey': _referencePeriodKeyForTemplate(template),
+              'createdAt': template.createdAt.toIso8601String(),
+              'updatedAt': template.updatedAt.toIso8601String(),
+            },
+          )
+          .toList(growable: false),
+      'prayer': List<Map<String, dynamic>>.generate(7, (weekday) {
+        final entry = _prayer.firstWhere(
+          (item) => item.weekday == weekday,
+          orElse: () => PrayerPlanEntry(
+            weekday: weekday,
+            title: null,
+            description: null,
+            updatedAt: now,
+          ),
+        );
+        return {
+          'weekday': entry.weekday,
+          'title': entry.title,
+          'description': entry.description,
+          'updatedAt': entry.updatedAt.toIso8601String(),
+        };
+      }, growable: false),
+      'history': _history
+          .map(
+            (entry) => {
+              'id': _portableHistoryId(entry.id),
+              'action': entry.action,
+              'message': entry.message,
+              'timestamp': entry.timestamp.toIso8601String(),
+              'dayKey': dayKey(entry.timestamp),
+            },
+          )
+          .toList(growable: false),
+      'settings': {
+        'notificationsEnabled': _notificationsEnabled,
+        'morningEnabled': _notificationsEnabled,
+        'morningTime': _morningNotificationTime,
+        'eveningEnabled': _notificationsEnabled,
+        'eveningTime': _eveningNotificationTime,
+        'timezoneId': _timezoneId,
+      },
+      'initializedPeriods': _initializedPeriods.toList(growable: false),
+      'finalisedPeriods': _finalizedPeriods.toList(growable: false),
+      'lastObservedDayKey': _lastObservedDayKey,
+    };
+  }
+
+  Map<String, dynamic> _buildExchangeEnvelope() {
+    return {
+      'format': 'daily-exchange-v1',
+      'exportedAt': _clock().toIso8601String(),
+      'source': 'daily-mobile',
+      'meta': {
+        'schemaVersion': 1,
+        'updatedAt': _portableUpdatedAt().toIso8601String(),
+        'appVersion': 'android-flutter',
+      },
+      'snapshot': _buildPortableSnapshot(),
+    };
+  }
+
+  DateTime _portableUpdatedAt() {
+    final timestamps = <DateTime>[
+      ..._tasks.map((item) => item.updatedAt),
+      ..._recurring.map((item) => item.updatedAt),
+      ..._prayer.map((item) => item.updatedAt),
+      ..._history.map((item) => item.timestamp),
+    ];
+    if (timestamps.isEmpty) {
+      return _clock();
+    }
+    timestamps.sort();
+    return timestamps.last;
+  }
+
+  List<Map<String, dynamic>> _portableReminderList(List<TaskReminder> reminders) {
+    final clean = normalizeTaskReminders(reminders);
+    return List<Map<String, dynamic>>.generate(clean.length, (index) {
+      final reminder = clean[index];
+      return {
+        'id': '${reminder.dateKey}|${reminder.time}|$index',
+        'dateKey': reminder.dateKey,
+        'time': reminder.time,
+      };
+    }, growable: false);
+  }
+
+  String _portableTaskId(int id) => 'task-$id';
+
+  String _portableRecurringId(int id) => 'recurring-$id';
+
+  String _portableHistoryId(int id) => 'history-$id';
+
+  String _referencePeriodKeyForTemplate(RecurringTaskTemplate template) {
+    final reminder = template.reminders.isNotEmpty ? template.reminders.first : null;
+    if (reminder != null && isDayKey(reminder.dateKey)) {
+      final date = parseDayKey(reminder.dateKey);
+      return switch (template.scope) {
+        PlanScope.day => dayKey(date),
+        PlanScope.week => weekKey(date),
+        PlanScope.month => monthKey(date),
+        PlanScope.year => yearKey(date),
+      };
+    }
+    return _selectedPeriods[template.scope] ?? defaultPeriodKey(template.scope, _clock());
+  }
+
+  Map<String, dynamic>? _extractImportSnapshot(Object raw) {
+    final record = _asRecord(raw);
+    if (record == null) {
+      return null;
+    }
+
+    if (record['format'] == 'daily-exchange-v1') {
+      final snapshot = record['snapshot'];
+      if (snapshot == null) {
+        return null;
+      }
+      return _extractImportSnapshot(snapshot);
+    }
+
+    if (record.containsKey('schemaVersion') || record.containsKey('settings')) {
+      return _convertPortableSnapshot(record);
+    }
+
+    if (record.containsKey('version')) {
+      return record;
+    }
+
+    return null;
+  }
+
+  Map<String, dynamic> _convertPortableSnapshot(Map<String, dynamic> snapshot) {
+    final now = _clock();
+    final defaultPeriods = <PlanScope, String>{
+      PlanScope.day: dayKey(dateOnly(now)),
+      PlanScope.week: weekKey(dateOnly(now)),
+      PlanScope.month: monthKey(dateOnly(now)),
+      PlanScope.year: yearKey(dateOnly(now)),
+    };
+
+    final selectedRaw = _asRecord(snapshot['selectedPeriods']) ?? const <String, dynamic>{};
+    final selectedPeriods = <String, String>{
+      for (final scope in PlanScope.values)
+        scope.name: jsonString(selectedRaw[scope.name]) ?? defaultPeriods[scope]!,
+    };
+
+    var nextRecurringId = 1;
+    final recurringIdMap = <String, int>{};
+    final recurring = _asMapList(snapshot['recurring']).map((item) {
+      final rawId = jsonString(item['id']) ?? 'recurring-$nextRecurringId';
+      final id = nextRecurringId++;
+      recurringIdMap[rawId] = id;
+      recurringIdMap[id.toString()] = id;
+
+      final scope = planScopeFromName(item['scope']) ?? PlanScope.day;
+      final referencePeriodKey =
+          jsonString(item['referencePeriodKey']) ?? selectedPeriods[scope.name]!;
+      return {
+        'id': id,
+        'scope': scope.name,
+        'title': jsonString(item['title']) ?? 'Без названия',
+        'description': jsonString(item['description']),
+        'remindersEnabled': jsonBool(item['remindersEnabled']),
+        'reminders': _portableRemindersToLegacy(
+          item['reminders'],
+          fallbackDateKey: _fallbackDateKey(referencePeriodKey, scope),
+        ),
+        'createdAt': _portableDate(item['createdAt'], now).toIso8601String(),
+        'updatedAt': _portableDate(item['updatedAt'], now).toIso8601String(),
+      };
+    }).toList(growable: false);
+
+    var nextTaskId = 1;
+    final tasks = _asMapList(snapshot['tasks']).map((item) {
+      final id = nextTaskId++;
+      final scope = planScopeFromName(item['scope']) ?? PlanScope.day;
+      final periodKey = jsonString(item['periodKey']) ?? selectedPeriods[scope.name]!;
+      final recurringIdRaw = item['recurringId'];
+      final recurringId = recurringIdRaw == null
+          ? null
+          : recurringIdMap[recurringIdRaw.toString()];
+      return {
+        'id': id,
+        'scope': scope.name,
+        'periodKey': periodKey,
+        'title': jsonString(item['title']) ?? 'Без названия',
+        'description': jsonString(item['description']),
+        'source': taskSourceFromName(item['source'])?.name ?? TaskSource.manual.name,
+        'isLocked': jsonBool(item['isLocked']),
+        'recurringId': recurringId,
+        'isDone': jsonBool(item['isDone']),
+        'remindersEnabled': jsonBool(item['remindersEnabled']),
+        'reminders': _portableRemindersToLegacy(
+          item['reminders'],
+          fallbackDateKey: _fallbackDateKey(periodKey, scope),
+        ),
+        'createdAt': _portableDate(item['createdAt'], now).toIso8601String(),
+        'updatedAt': _portableDate(item['updatedAt'], now).toIso8601String(),
+        'doneAt': _portableDateOrNull(item['doneAt'])?.toIso8601String(),
+      };
+    }).toList(growable: false);
+
+    final prayerByWeekday = <int, Map<String, dynamic>>{};
+    for (final item in _asMapList(snapshot['prayer'])) {
+      final weekday = jsonInt(item['weekday'], fallback: -1);
+      if (weekday < 0 || weekday > 6) {
+        continue;
+      }
+      prayerByWeekday[weekday] = {
+        'weekday': weekday,
+        'title': jsonString(item['title']),
+        'description': jsonString(item['description']),
+        'updatedAt': _portableDate(item['updatedAt'], now).toIso8601String(),
+      };
+    }
+    final prayer = List<Map<String, dynamic>>.generate(7, (weekday) {
+      return prayerByWeekday[weekday] ??
+          {
+            'weekday': weekday,
+            'title': null,
+            'description': null,
+            'updatedAt': now.toIso8601String(),
+          };
+    }, growable: false);
+
+    var nextHistoryId = 1;
+    final history = _asMapList(snapshot['history']).map((item) {
+      final id = nextHistoryId++;
+      return {
+        'id': id,
+        'action': jsonString(item['action']) ?? 'unknown',
+        'message': jsonString(item['message']) ?? '',
+        'timestamp': _portableDate(item['timestamp'], now).toIso8601String(),
+      };
+    }).toList(growable: false);
+
+    final settings = _asRecord(snapshot['settings']) ?? const <String, dynamic>{};
+    final notificationsEnabled =
+        jsonBool(settings['notificationsEnabled']) ||
+        jsonBool(snapshot['notificationsEnabled']);
+    final morningTime =
+        normalizeTime(settings['morningTime']) ??
+        normalizeTime(snapshot['morningNotificationTime']) ??
+        _morningNotificationTime;
+    final eveningTime =
+        normalizeTime(settings['eveningTime']) ??
+        normalizeTime(snapshot['eveningNotificationTime']) ??
+        _eveningNotificationTime;
+    final timezoneId =
+        (jsonString(settings['timezoneId']) ?? jsonString(snapshot['timezoneId']) ?? _timezoneId)
+            .trim();
+
+    return {
+      'version': 1,
+      'activeScope': planScopeFromName(snapshot['activeScope'])?.name ?? PlanScope.day.name,
+      'selectedPeriods': selectedPeriods,
+      'tasks': tasks,
+      'recurring': recurring,
+      'prayer': prayer,
+      'history': history,
+      'initializedPeriods': _asStringList(snapshot['initializedPeriods']),
+      'finalizedPeriods': _asStringList(snapshot['finalisedPeriods']),
+      'taskId': nextTaskId,
+      'recurringId': nextRecurringId,
+      'historyId': nextHistoryId,
+      'notificationsEnabled': notificationsEnabled,
+      'morningNotificationTime': morningTime,
+      'eveningNotificationTime': eveningTime,
+      'timezoneId': timezoneId.isEmpty ? _timezoneId : timezoneId,
+      'lastObservedDayKey': _importLastObservedDay(snapshot, selectedPeriods['day']!),
+    };
+  }
+
+  String _fallbackDateKey(String periodKey, PlanScope scope) {
+    try {
+      return switch (scope) {
+        PlanScope.day => isDayKey(periodKey)
+            ? periodKey
+            : dayKey(dateOnly(_clock())),
+        PlanScope.week => dayKey(parseWeekKey(periodKey)),
+        PlanScope.month => '${periodKey}-01',
+        PlanScope.year => '$periodKey-01-01',
+      };
+    } catch (_) {
+      return dayKey(dateOnly(_clock()));
+    }
+  }
+
+  List<Map<String, dynamic>> _portableRemindersToLegacy(
+    Object? raw, {
+    required String fallbackDateKey,
+  }) {
+    final reminders = normalizeTaskReminders(
+      parseTaskRemindersFromJson(
+        {'reminders': raw},
+        fallbackDateKey: fallbackDateKey,
+      ),
+    );
+    return reminders
+        .map(
+          (item) => {
+            'dateKey': item.dateKey,
+            'time': item.time,
+          },
+        )
+        .toList(growable: false);
+  }
+
+  String _importLastObservedDay(Map<String, dynamic> snapshot, String fallback) {
+    final raw = jsonString(snapshot['lastObservedDayKey']);
+    if (raw != null && isDayKey(raw)) {
+      return raw;
+    }
+    return fallback;
+  }
+
+  DateTime _portableDate(Object? raw, DateTime fallback) {
+    if (raw is String) {
+      return DateTime.tryParse(raw) ?? fallback;
+    }
+    return fallback;
+  }
+
+  DateTime? _portableDateOrNull(Object? raw) {
+    if (raw is! String) {
+      return null;
+    }
+    return DateTime.tryParse(raw);
+  }
+
+  Map<String, dynamic>? _asRecord(Object? value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+    if (value is Map) {
+      return value.cast<String, dynamic>();
+    }
+    return null;
   }
 
   Future<void> _persistNow() async {
@@ -4185,6 +4687,19 @@ String monthKey(DateTime date) {
 
 String yearKey(DateTime date) {
   return date.year.toString();
+}
+
+String defaultPeriodKey(PlanScope scope, DateTime date) {
+  switch (scope) {
+    case PlanScope.day:
+      return dayKey(date);
+    case PlanScope.week:
+      return weekKey(date);
+    case PlanScope.month:
+      return monthKey(date);
+    case PlanScope.year:
+      return yearKey(date);
+  }
 }
 
 String weekKey(DateTime date) {

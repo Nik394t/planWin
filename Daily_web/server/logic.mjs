@@ -396,26 +396,30 @@ export function prepareSnapshotForNow(rawSnapshot, now = new Date()) {
   return snapshot;
 }
 
-function tagDelivered(store, deviceId, tag, timestamp) {
-  store.delivered[deviceId] ||= {};
-  store.delivered[deviceId][tag] = timestamp;
+function tagDelivered(store, userId, deviceId, tag, timestamp) {
+  store.delivered[userId] ||= {};
+  store.delivered[userId][deviceId] ||= {};
+  store.delivered[userId][deviceId][tag] = timestamp;
 }
 
-function wasDelivered(store, deviceId, tag) {
-  return Boolean(store.delivered?.[deviceId]?.[tag]);
+function wasDelivered(store, userId, deviceId, tag) {
+  return Boolean(store.delivered?.[userId]?.[deviceId]?.[tag]);
 }
 
 function pruneDelivered(store) {
   const threshold = Date.now() - 30 * 86400000;
-  for (const [deviceId, tags] of Object.entries(store.delivered || {})) {
-    const compacted = Object.fromEntries(
-      Object.entries(tags).filter(([, timestamp]) => new Date(timestamp).getTime() >= threshold),
-    );
-    store.delivered[deviceId] = compacted;
+  for (const [userId, devices] of Object.entries(store.delivered || {})) {
+    store.delivered[userId] ||= {};
+    for (const [deviceId, tags] of Object.entries(devices || {})) {
+      const compacted = Object.fromEntries(
+        Object.entries(tags || {}).filter(([, timestamp]) => new Date(timestamp).getTime() >= threshold),
+      );
+      store.delivered[userId][deviceId] = compacted;
+    }
   }
 }
 
-export function computeDueNotifications(store, deviceId, rawSnapshot, now = new Date()) {
+export function computeDueNotifications(store, userId, deviceId, rawSnapshot, now = new Date()) {
   const snapshot = prepareSnapshotForNow(rawSnapshot, now);
   const timezoneId = snapshot.settings?.timezoneId || 'UTC';
   const zoned = nowInTimezone(timezoneId, now);
@@ -429,7 +433,7 @@ export function computeDueNotifications(store, deviceId, rawSnapshot, now = new 
 
   if (snapshot.settings.morningEnabled && snapshot.settings.morningTime === currentMinute) {
     const tag = `morning:${todayKey}:${currentMinute}`;
-    if (!wasDelivered(store, deviceId, tag)) {
+    if (!wasDelivered(store, userId, deviceId, tag)) {
       notifications.push({
         tag,
         title: 'Daily',
@@ -442,7 +446,7 @@ export function computeDueNotifications(store, deviceId, rawSnapshot, now = new 
   if (snapshot.settings.eveningEnabled && snapshot.settings.eveningTime === currentMinute) {
     const unfinished = tasksFor(snapshot, 'day', todayKey).filter((task) => !task.isDone).length;
     const tag = `evening:${todayKey}:${currentMinute}`;
-    if (unfinished > 0 && !wasDelivered(store, deviceId, tag)) {
+    if (unfinished > 0 && !wasDelivered(store, userId, deviceId, tag)) {
       notifications.push({
         tag,
         title: 'Daily',
@@ -464,7 +468,7 @@ export function computeDueNotifications(store, deviceId, rawSnapshot, now = new 
         continue;
       }
       const tag = `task:${task.id}:${reminder.dateKey}:${reminder.time}`;
-      if (wasDelivered(store, deviceId, tag)) {
+      if (wasDelivered(store, userId, deviceId, tag)) {
         continue;
       }
       notifications.push({
@@ -479,7 +483,7 @@ export function computeDueNotifications(store, deviceId, rawSnapshot, now = new 
   return { notifications, snapshot };
 }
 
-export function markDelivered(store, deviceId, tag, timestamp = new Date().toISOString()) {
-  tagDelivered(store, deviceId, tag, timestamp);
+export function markDelivered(store, userId, deviceId, tag, timestamp = new Date().toISOString()) {
+  tagDelivered(store, userId, deviceId, tag, timestamp);
   pruneDelivered(store);
 }

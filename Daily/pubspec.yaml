@@ -1,5 +1,5 @@
 name: daily
-description: "Daily planner app based on plan_win_bot"
+description: "Daily planner with reminders, history and portable backups"
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  file_picker: ^10.3.3
 
 dev_dependencies:
   flutter_test:

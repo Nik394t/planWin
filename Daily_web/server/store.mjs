@@ -15,7 +15,8 @@ function defaultStore() {
       privateKey: '',
       subject: 'mailto:daily@example.local',
     },
-    devices: {},
+    users: {},
+    sessions: {},
     delivered: {},
   };
 }
@@ -29,7 +30,8 @@ function mergeStore(parsed) {
       ...fallback.vapid,
       ...(parsed?.vapid ?? {}),
     },
-    devices: parsed?.devices ?? {},
+    users: parsed?.users ?? {},
+    sessions: parsed?.sessions ?? {},
     delivered: parsed?.delivered ?? {},
   };
 }
